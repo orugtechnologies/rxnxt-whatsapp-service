@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 
 const app = express();
@@ -77,9 +77,9 @@ app.get('/api/whatsapp/status', (req, res) => {
 });
 
 // 2. Send a WhatsApp Message
-app.post('/api/whatsapp/send', async (req, res) => {
+    app.post('/api/whatsapp/send', async (req, res) => {
     try {
-        const { phone, message } = req.body;
+        const { phone, message, pdfBase64 } = req.body;
 
         if (!phone || !message) {
             return res.status(400).json({ error: 'Phone and message are required' });
@@ -102,7 +102,15 @@ app.post('/api/whatsapp/send', async (req, res) => {
             return res.status(400).json({ error: `Phone number ${cleanPhone} is not registered on WhatsApp` });
         }
 
-        const response = await client.sendMessage(chatId, message);
+        let response;
+        if (pdfBase64) {
+            // Send as a document attachment with the message as a caption
+            const media = new MessageMedia('application/pdf', pdfBase64, 'Prescription.pdf');
+            response = await client.sendMessage(chatId, media, { caption: message });
+        } else {
+            // Send plain text message
+            response = await client.sendMessage(chatId, message);
+        }
         console.log(`Message sent to ${chatId}: ${response.id.id}`);
 
         res.json({ success: true, messageId: response.id.id });
