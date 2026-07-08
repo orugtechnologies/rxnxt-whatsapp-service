@@ -14,6 +14,7 @@ let isConnected = false;
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
+        executablePath: '/usr/bin/chromium',
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox',
