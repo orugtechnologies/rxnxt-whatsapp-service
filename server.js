@@ -111,7 +111,7 @@ app.post('/api/whatsapp/send', async (req, res) => {
     }
 });
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
     console.log(`WhatsApp Microservice running on http://localhost:${PORT}`);
     console.log(`Waiting for WhatsApp client to initialize...`);
