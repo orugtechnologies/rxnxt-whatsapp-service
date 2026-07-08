@@ -97,6 +97,11 @@ app.post('/api/whatsapp/send', async (req, res) => {
         
         const chatId = `${cleanPhone}@c.us`;
 
+        const isRegistered = await client.isRegisteredUser(chatId);
+        if (!isRegistered) {
+            return res.status(400).json({ error: `Phone number ${cleanPhone} is not registered on WhatsApp` });
+        }
+
         const response = await client.sendMessage(chatId, message);
         console.log(`Message sent to ${chatId}: ${response.id.id}`);
 
