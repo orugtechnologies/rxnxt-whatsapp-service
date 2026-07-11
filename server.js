@@ -1,7 +1,64 @@
 const express = require('express');
 const cors = require('cors');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
+const { Pool } = require('pg');
+const fs = require('fs');
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
+
+pool.query(`
+    CREATE TABLE IF NOT EXISTS whatsapp_sessions (
+        session_id VARCHAR(255) PRIMARY KEY,
+        session_data BYTEA NOT NULL
+    )
+`).catch(console.error);
+
+class PostgresStore {
+    constructor(pool) {
+        this.pool = pool;
+    }
+
+    async sessionExists({ session }) {
+        const res = await this.pool.query('SELECT session_id FROM whatsapp_sessions WHERE session_id = $1', [session]);
+        return res.rows.length > 0;
+    }
+
+    async save({ session, path }) {
+        try {
+            const data = fs.readFileSync(path);
+            await this.pool.query(
+                `INSERT INTO whatsapp_sessions (session_id, session_data) VALUES ($1, $2)
+                 ON CONFLICT (session_id) DO UPDATE SET session_data = EXCLUDED.session_data`,
+                [session, data]
+            );
+        } catch (error) {
+            console.error('PostgresStore save error:', error);
+        }
+    }
+
+    async extract({ session, path }) {
+        try {
+            const res = await this.pool.query('SELECT session_data FROM whatsapp_sessions WHERE session_id = $1', [session]);
+            if (res.rows.length > 0) {
+                fs.writeFileSync(path, res.rows[0].session_data);
+            }
+        } catch (error) {
+            console.error('PostgresStore extract error:', error);
+        }
+    }
+
+    async delete({ session }) {
+        try {
+            await this.pool.query('DELETE FROM whatsapp_sessions WHERE session_id = $1', [session]);
+        } catch (error) {
+            console.error('PostgresStore delete error:', error);
+        }
+    }
+}
 
 const app = express();
 app.use(cors());
@@ -10,9 +67,12 @@ app.use(express.json());
 let latestQR = null;
 let isConnected = false;
 
-// Initialize WhatsApp Client with LocalAuth to persist session across restarts
+// Initialize WhatsApp Client with RemoteAuth to persist session in PostgreSQL
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new RemoteAuth({
+        store: new PostgresStore(pool),
+        backupSyncIntervalMs: 300000
+    }),
     puppeteer: {
         executablePath: '/usr/bin/chromium',
         args: [
