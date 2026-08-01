@@ -183,9 +183,11 @@ app.get('/api/whatsapp/status', (req, res) => {
             // Send plain text message
             response = await client.sendMessage(chatId, message);
         }
-        console.log(`Message sent to ${chatId}: ${response.id.id}`);
 
-        res.json({ success: true, messageId: response.id.id });
+        const messageId = (response && response.id) ? (response.id._serialized || response.id.id) : 'unknown';
+        console.log(`Message sent to ${chatId}: ${messageId}`);
+
+        res.json({ success: true, messageId });
     } catch (error) {
         console.error('Error sending message:', error);
         res.status(500).json({ error: 'Failed to send message', details: error.message });
