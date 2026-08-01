@@ -62,109 +62,133 @@ class PostgresStore {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-let latestQR = null;
-let isConnected = false;
+// Multi-Tenant state tracking
+const clients = new Map();
+const clientStatus = new Map(); // clinicId -> { isConnected: boolean, latestQR: string | null }
 
-// Initialize WhatsApp Client with RemoteAuth to persist session in PostgreSQL
-const client = new Client({
-    authStrategy: new RemoteAuth({
-        store: new PostgresStore(pool),
-        backupSyncIntervalMs: 300000
-    }),
-    puppeteer: {
-        executablePath: '/usr/bin/chromium',
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-software-rasterizer',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-sync',
-            '--disable-translate',
-            '--hide-scrollbars',
-            '--metrics-recording-only',
-            '--mute-audio',
-            '--no-default-browser-check',
-            '--single-process',
-            '--js-flags="--max-old-space-size=250"'
-        ]
-    },
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+function getClientStatus(clinicId) {
+    if (!clientStatus.has(clinicId)) {
+        clientStatus.set(clinicId, { isConnected: false, latestQR: null });
     }
-});
+    return clientStatus.get(clinicId);
+}
 
-// Generate QR Code
-client.on('qr', (qr) => {
-    console.log('QR Code received, waiting for scan...');
-    // Convert raw QR string to base64 Data URL so the frontend can easily display it in an <img> tag
-    qrcode.toDataURL(qr, (err, url) => {
-        if (err) {
-            console.error('Error generating QR Data URL', err);
-            return;
+function getOrCreateClient(clinicId = 'default') {
+    if (clients.has(clinicId)) {
+        return clients.get(clinicId);
+    }
+
+    console.log(`[Multi-Tenant] Initializing WhatsApp Client for clinic: ${clinicId}`);
+    const status = getClientStatus(clinicId);
+
+    const client = new Client({
+        authStrategy: new RemoteAuth({
+            clientId: clinicId,
+            store: new PostgresStore(pool),
+            backupSyncIntervalMs: 300000
+        }),
+        puppeteer: {
+            executablePath: '/usr/bin/chromium',
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-software-rasterizer',
+                '--disable-background-networking',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--hide-scrollbars',
+                '--metrics-recording-only',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--single-process',
+                '--js-flags="--max-old-space-size=250"'
+            ]
+        },
+        webVersionCache: {
+            type: 'remote',
+            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
         }
-        latestQR = url;
     });
-});
 
-// Client is ready and connected
-client.on('ready', () => {
-    console.log('Client is ready!');
-    isConnected = true;
-    latestQR = null; // Clear QR once connected
-});
+    client.on('qr', (qr) => {
+        console.log(`[Clinic: ${clinicId}] QR Code received, waiting for scan...`);
+        qrcode.toDataURL(qr, (err, url) => {
+            if (err) {
+                console.error(`[Clinic: ${clinicId}] Error generating QR Data URL`, err);
+                return;
+            }
+            status.latestQR = url;
+            status.isConnected = false;
+        });
+    });
 
-// Client is disconnected
-client.on('disconnected', (reason) => {
-    console.log('Client was logged out', reason);
-    isConnected = false;
-    // Destroy and re-initialize client to generate a new QR code
-    client.destroy();
-    client.initialize();
-});
+    client.on('ready', () => {
+        console.log(`[Clinic: ${clinicId}] Client is ready!`);
+        status.isConnected = true;
+        status.latestQR = null;
+    });
 
-// Initialize the client on startup
-client.initialize();
+    client.on('disconnected', (reason) => {
+        console.log(`[Clinic: ${clinicId}] Client logged out:`, reason);
+        status.isConnected = false;
+        status.latestQR = null;
+        clients.delete(clinicId);
+        client.destroy().catch(console.error);
+    });
+
+    clients.set(clinicId, client);
+    client.initialize().catch(err => {
+        console.error(`[Clinic: ${clinicId}] Failed to initialize:`, err);
+    });
+
+    return client;
+}
 
 // API ROUTES
 
-// 1. Get the current QR Code or Status
+// 1. Get current QR Code or Status for a specific clinic
 app.get('/api/whatsapp/status', (req, res) => {
-    if (isConnected) {
-        return res.json({ status: 'connected', qr: null });
-    } else if (latestQR) {
-        return res.json({ status: 'waiting_for_scan', qr: latestQR });
+    const clinicId = req.query.clinicId || 'default';
+    
+    // Ensure client instance exists
+    getOrCreateClient(clinicId);
+    const status = getClientStatus(clinicId);
+
+    if (status.isConnected) {
+        return res.json({ status: 'connected', qr: null, clinicId });
+    } else if (status.latestQR) {
+        return res.json({ status: 'waiting_for_scan', qr: status.latestQR, clinicId });
     } else {
-        return res.json({ status: 'initializing', qr: null });
+        return res.json({ status: 'initializing', qr: null, clinicId });
     }
 });
 
-// 2. Send a WhatsApp Message
-    app.post('/api/whatsapp/send', async (req, res) => {
+// 2. Send a WhatsApp Message for a specific clinic
+app.post('/api/whatsapp/send', async (req, res) => {
     try {
-        const { phone, message, pdfBase64 } = req.body;
+        const { phone, message, pdfBase64, clinicId = 'default' } = req.body;
 
         if (!phone || !message) {
             return res.status(400).json({ error: 'Phone and message are required' });
         }
 
-        if (!isConnected) {
-            return res.status(503).json({ error: 'WhatsApp is not connected yet' });
+        const client = getOrCreateClient(clinicId);
+        const status = getClientStatus(clinicId);
+
+        if (!status.isConnected) {
+            return res.status(503).json({ error: `WhatsApp is not connected yet for clinic ${clinicId}` });
         }
 
-        // Format phone number to WhatsApp format (e.g., 919876543210@c.us)
-        // Strip everything except digits
         let cleanPhone = phone.replace(/[^\d]/g, '');
-        // Default to India (+91) if 10 digits
         if (cleanPhone.length === 10) cleanPhone = `91${cleanPhone}`;
         
         const chatId = `${cleanPhone}@c.us`;
@@ -176,18 +200,16 @@ app.get('/api/whatsapp/status', (req, res) => {
 
         let response;
         if (pdfBase64) {
-            // Send as a document attachment with the message as a caption
             const media = new MessageMedia('application/pdf', pdfBase64, 'Prescription.pdf');
             response = await client.sendMessage(chatId, media, { caption: message });
         } else {
-            // Send plain text message
             response = await client.sendMessage(chatId, message);
         }
 
         const messageId = (response && response.id) ? (response.id._serialized || response.id.id) : 'unknown';
-        console.log(`Message sent to ${chatId}: ${messageId}`);
+        console.log(`[Clinic: ${clinicId}] Message sent to ${chatId}: ${messageId}`);
 
-        res.json({ success: true, messageId });
+        res.json({ success: true, messageId, clinicId });
     } catch (error) {
         console.error('Error sending message:', error);
         res.status(500).json({ error: 'Failed to send message', details: error.message });
@@ -196,6 +218,5 @@ app.get('/api/whatsapp/status', (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log(`WhatsApp Microservice running on http://localhost:${PORT}`);
-    console.log(`Waiting for WhatsApp client to initialize...`);
+    console.log(`Multi-Tenant WhatsApp Microservice running on port ${PORT}`);
 });
