@@ -1,71 +1,43 @@
 const express = require('express');
 const cors = require('cors');
-const { Client, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const { Pool } = require('pg');
-const fs = require('fs');
+const fs = require('fs-extra');
+const path = require('path');
+const pino = require('pino');
 
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    delay
+} = require('@whiskeysockets/baileys');
+
+const logger = pino({ level: 'silent' });
+
+// PostgreSQL Connection Pool
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false }
 });
 
+// Initialize database schema for session persistence
 pool.query(`
-    CREATE TABLE IF NOT EXISTS whatsapp_sessions (
-        session_id VARCHAR(255) PRIMARY KEY,
-        session_data BYTEA NOT NULL
+    CREATE TABLE IF NOT EXISTS whatsapp_sessions_v2 (
+        clinic_id VARCHAR(255) PRIMARY KEY,
+        session_data JSONB NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
-`).catch(console.error);
-
-class PostgresStore {
-    constructor(pool) {
-        this.pool = pool;
-    }
-
-    async sessionExists({ session }) {
-        const res = await this.pool.query('SELECT session_id FROM whatsapp_sessions WHERE session_id = $1', [session]);
-        return res.rows.length > 0;
-    }
-
-    async save({ session, path }) {
-        try {
-            const data = fs.readFileSync(path);
-            await this.pool.query(
-                `INSERT INTO whatsapp_sessions (session_id, session_data) VALUES ($1, $2)
-                 ON CONFLICT (session_id) DO UPDATE SET session_data = EXCLUDED.session_data`,
-                [session, data]
-            );
-        } catch (error) {
-            console.error('PostgresStore save error:', error);
-        }
-    }
-
-    async extract({ session, path }) {
-        try {
-            const res = await this.pool.query('SELECT session_data FROM whatsapp_sessions WHERE session_id = $1', [session]);
-            if (res.rows.length > 0) {
-                fs.writeFileSync(path, res.rows[0].session_data);
-            }
-        } catch (error) {
-            console.error('PostgresStore extract error:', error);
-        }
-    }
-
-    async delete({ session }) {
-        try {
-            await this.pool.query('DELETE FROM whatsapp_sessions WHERE session_id = $1', [session]);
-        } catch (error) {
-            console.error('PostgresStore delete error:', error);
-        }
-    }
-}
+`).catch(err => console.error('[DB Setup Error]', err));
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '15mb' }));
 
-// Multi-Tenant state tracking
-const clients = new Map();
+// Multi-Tenant state tracking maps
+const sockets = new Map(); // clinicId -> WASocket
 const clientStatus = new Map(); // clinicId -> { isConnected: boolean, latestQR: string | null }
 
 function getClientStatus(clinicId) {
@@ -75,104 +47,104 @@ function getClientStatus(clinicId) {
     return clientStatus.get(clinicId);
 }
 
-function getOrCreateClient(clinicId = 'default') {
-    if (clients.has(clinicId)) {
-        return clients.get(clinicId);
+// Ensure session directory exists
+async function getOrCreateBaileysSocket(clinicId = 'default') {
+    if (sockets.has(clinicId)) {
+        return sockets.get(clinicId);
     }
 
-    console.log(`[Multi-Tenant] Initializing WhatsApp Client for clinic: ${clinicId}`);
+    console.log(`[Baileys Engine] Initializing WhatsApp session for clinic: ${clinicId}`);
     const status = getClientStatus(clinicId);
 
-    const client = new Client({
-        authStrategy: new RemoteAuth({
-            clientId: clinicId,
-            store: new PostgresStore(pool),
-            backupSyncIntervalMs: 300000
-        }),
-        puppeteer: {
-            executablePath: '/usr/bin/chromium',
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--disable-software-rasterizer',
-                '--disable-background-networking',
-                '--disable-default-apps',
-                '--disable-sync',
-                '--disable-translate',
-                '--hide-scrollbars',
-                '--metrics-recording-only',
-                '--mute-audio',
-                '--no-default-browser-check',
-                '--single-process',
-                '--js-flags="--max-old-space-size=250"'
-            ]
+    const sessionDir = path.join(__dirname, `sessions_${clinicId}`);
+    await fs.ensureDir(sessionDir);
+
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
+
+    const sock = makeWASocket({
+        version,
+        logger,
+        printQRInTerminal: false,
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, logger),
         },
-        webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+        generateHighQualityLinkPreview: true,
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 25000,
+    });
+
+    sockets.set(clinicId, sock);
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            console.log(`[Clinic: ${clinicId}] Fresh QR Code generated.`);
+            try {
+                const qrUrl = await qrcode.toDataURL(qr);
+                status.latestQR = qrUrl;
+                status.isConnected = false;
+            } catch (err) {
+                console.error(`[Clinic: ${clinicId}] QR Generation Error:`, err);
+            }
+        }
+
+        if (connection === 'open') {
+            console.log(`[Clinic: ${clinicId}] ✅ WhatsApp Connected & Ready!`);
+            status.isConnected = true;
+            status.latestQR = null;
+        }
+
+        if (connection === 'close') {
+            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+            console.log(`[Clinic: ${clinicId}] Connection closed (Reason code: ${statusCode}). Reconnect: ${shouldReconnect}`);
+            status.isConnected = false;
+            status.latestQR = null;
+            sockets.delete(clinicId);
+
+            if (shouldReconnect) {
+                await delay(3000);
+                getOrCreateBaileysSocket(clinicId).catch(console.error);
+            } else {
+                console.log(`[Clinic: ${clinicId}] Logged out. Cleaning session data.`);
+                await fs.remove(sessionDir).catch(() => {});
+            }
         }
     });
 
-    client.on('qr', (qr) => {
-        console.log(`[Clinic: ${clinicId}] QR Code received, waiting for scan...`);
-        qrcode.toDataURL(qr, (err, url) => {
-            if (err) {
-                console.error(`[Clinic: ${clinicId}] Error generating QR Data URL`, err);
-                return;
-            }
-            status.latestQR = url;
-            status.isConnected = false;
-        });
-    });
-
-    client.on('ready', () => {
-        console.log(`[Clinic: ${clinicId}] Client is ready!`);
-        status.isConnected = true;
-        status.latestQR = null;
-    });
-
-    client.on('disconnected', (reason) => {
-        console.log(`[Clinic: ${clinicId}] Client logged out:`, reason);
-        status.isConnected = false;
-        status.latestQR = null;
-        clients.delete(clinicId);
-        client.destroy().catch(console.error);
-    });
-
-    clients.set(clinicId, client);
-    client.initialize().catch(err => {
-        console.error(`[Clinic: ${clinicId}] Failed to initialize:`, err);
-    });
-
-    return client;
+    return sock;
 }
 
 // API ROUTES
 
-// 1. Get current QR Code or Status for a specific clinic
-app.get('/api/whatsapp/status', (req, res) => {
+// 1. Get WhatsApp Status or QR Code for clinic
+app.get('/api/whatsapp/status', async (req, res) => {
     const clinicId = req.query.clinicId || 'default';
     
-    // Ensure client instance exists
-    getOrCreateClient(clinicId);
-    const status = getClientStatus(clinicId);
+    try {
+        await getOrCreateBaileysSocket(clinicId);
+        const status = getClientStatus(clinicId);
 
-    if (status.isConnected) {
-        return res.json({ status: 'connected', qr: null, clinicId });
-    } else if (status.latestQR) {
-        return res.json({ status: 'waiting_for_scan', qr: status.latestQR, clinicId });
-    } else {
-        return res.json({ status: 'initializing', qr: null, clinicId });
+        if (status.isConnected) {
+            return res.json({ status: 'connected', qr: null, clinicId });
+        } else if (status.latestQR) {
+            return res.json({ status: 'waiting_for_scan', qr: status.latestQR, clinicId });
+        } else {
+            return res.json({ status: 'initializing', qr: null, clinicId });
+        }
+    } catch (err) {
+        console.error(`[Clinic: ${clinicId}] Status Error:`, err);
+        return res.status(500).json({ error: err.message, clinicId });
     }
 });
 
-// 2. Send a WhatsApp Message for a specific clinic
+// 2. Send WhatsApp Message (Text or PDF Attachment)
 app.post('/api/whatsapp/send', async (req, res) => {
     try {
         const { phone, message, pdfBase64, clinicId = 'default' } = req.body;
@@ -181,42 +153,45 @@ app.post('/api/whatsapp/send', async (req, res) => {
             return res.status(400).json({ error: 'Phone and message are required' });
         }
 
-        const client = getOrCreateClient(clinicId);
+        const sock = await getOrCreateBaileysSocket(clinicId);
         const status = getClientStatus(clinicId);
 
         if (!status.isConnected) {
-            return res.status(503).json({ error: `WhatsApp is not connected yet for clinic ${clinicId}` });
+            return res.status(530).json({ error: `WhatsApp is not connected yet for clinic ${clinicId}` });
         }
 
         let cleanPhone = phone.replace(/[^\d]/g, '');
         if (cleanPhone.length === 10) cleanPhone = `91${cleanPhone}`;
         
-        const chatId = `${cleanPhone}@c.us`;
-
-        const isRegistered = await client.isRegisteredUser(chatId);
-        if (!isRegistered) {
-            return res.status(400).json({ error: `Phone number ${cleanPhone} is not registered on WhatsApp` });
-        }
+        const recipientJid = `${cleanPhone}@s.whatsapp.net`;
 
         let response;
         if (pdfBase64) {
-            const media = new MessageMedia('application/pdf', pdfBase64, 'Prescription.pdf');
-            response = await client.sendMessage(chatId, media, { caption: message });
+            const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+            response = await sock.sendMessage(recipientJid, {
+                document: pdfBuffer,
+                mimetype: 'application/pdf',
+                fileName: 'RxNXT_Prescription.pdf',
+                caption: message
+            });
         } else {
-            response = await client.sendMessage(chatId, message);
+            response = await sock.sendMessage(recipientJid, { text: message });
         }
 
-        const messageId = (response && response.id) ? (response.id._serialized || response.id.id) : 'unknown';
-        console.log(`[Clinic: ${clinicId}] Message sent to ${chatId}: ${messageId}`);
+        const messageId = response?.key?.id || 'sent';
+        console.log(`[Clinic: ${clinicId}] Baileys Message sent to ${recipientJid}: ${messageId}`);
 
         res.json({ success: true, messageId, clinicId });
     } catch (error) {
-        console.error('Error sending message:', error);
-        res.status(500).json({ error: 'Failed to send message', details: error.message });
+        console.error('[Baileys Send Error]:', error);
+        res.status(500).json({ error: 'Failed to send WhatsApp message', details: error.message });
     }
 });
 
+// Health check
+app.get('/health', (req, res) => res.json({ status: 'ok', engine: 'Baileys Multi-Device v6' }));
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log(`Multi-Tenant WhatsApp Microservice running on port ${PORT}`);
+    console.log(`🚀 RxNXT Baileys WhatsApp Engine running on port ${PORT}`);
 });

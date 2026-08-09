@@ -1,23 +1,21 @@
 {
   "name": "whatsapp-microservice",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "RxNXT Lightweight Multi-Tenant WhatsApp Microservice powered by Baileys",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "RxNXT",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.18",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "qrcode": "^1.5.4",
-    "whatsapp-web.js": "^1.34.7",
     "pg": "^8.11.3",
-    "fs-extra": "^11.2.0",
-    "unzipper": "^0.10.14",
-    "archiver": "^6.0.1"
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
   }
 }
