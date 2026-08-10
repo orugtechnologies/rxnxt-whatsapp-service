@@ -56,7 +56,7 @@ async function getOrCreateBaileysSocket(clinicId = 'default') {
     console.log(`[Baileys Engine] Initializing WhatsApp session for clinic: ${clinicId}`);
     const status = getClientStatus(clinicId);
 
-    const sessionDir = path.join(__dirname, 'data', `v3_sessions_${clinicId}`);
+    const sessionDir = path.join(__dirname, 'data', `v4_sessions_${clinicId}`);
     await fs.ensureDir(sessionDir);
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -64,12 +64,12 @@ async function getOrCreateBaileysSocket(clinicId = 'default') {
 
     const sock = makeWASocket({
         version,
-        logger,
+        logger: pino({ level: 'info' }),
         printQRInTerminal: false,
         browser: ['RxNXT', 'Chrome', '20.0.04'],
         auth: {
             creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, logger),
+            keys: state.keys,
         },
         generateHighQualityLinkPreview: true,
         connectTimeoutMs: 60000,
@@ -101,6 +101,7 @@ async function getOrCreateBaileysSocket(clinicId = 'default') {
         }
 
         if (connection === 'close') {
+            console.log(`[Clinic: ${clinicId}] FATAL CRASH DATA:`, lastDisconnect?.error);
             const statusCode = (lastDisconnect?.error)?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
