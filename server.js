@@ -1,3 +1,6 @@
+const crypto = require('crypto');
+global.crypto = crypto.webcrypto || crypto;
+
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
