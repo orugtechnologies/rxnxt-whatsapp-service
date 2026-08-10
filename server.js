@@ -66,6 +66,7 @@ async function getOrCreateBaileysSocket(clinicId = 'default') {
         version,
         logger,
         printQRInTerminal: false,
+        browser: ['RxNXT', 'Chrome', '20.0.04'],
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, logger),
@@ -73,11 +74,6 @@ async function getOrCreateBaileysSocket(clinicId = 'default') {
         generateHighQualityLinkPreview: true,
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
-        
-        // --- RxNXT RAM Optimizations ---
-        syncFullHistory: false,
-        markOnlineOnConnect: false,
-        emitOwnEvents: false
     });
 
     sockets.set(clinicId, sock);
