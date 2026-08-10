@@ -73,6 +73,11 @@ async function getOrCreateBaileysSocket(clinicId = 'default') {
         generateHighQualityLinkPreview: true,
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
+        
+        // --- RxNXT RAM Optimizations ---
+        syncFullHistory: false,
+        markOnlineOnConnect: false,
+        emitOwnEvents: false
     });
 
     sockets.set(clinicId, sock);
