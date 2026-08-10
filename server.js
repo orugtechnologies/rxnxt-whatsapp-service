@@ -56,11 +56,11 @@ async function getOrCreateBaileysSocket(clinicId = 'default') {
     console.log(`[Baileys Engine] Initializing WhatsApp session for clinic: ${clinicId}`);
     const status = getClientStatus(clinicId);
 
-    const sessionDir = path.join(__dirname, 'data', `secure_sessions_${clinicId}`);
+    const sessionDir = path.join(__dirname, 'data', `v3_sessions_${clinicId}`);
     await fs.ensureDir(sessionDir);
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-    const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
+    const version = [2, 2413, 51];
 
     const sock = makeWASocket({
         version,
