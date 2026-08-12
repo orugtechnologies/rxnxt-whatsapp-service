@@ -8,6 +8,7 @@ const { Pool } = require('pg');
 const fs = require('fs-extra');
 const path = require('path');
 const pino = require('pino');
+const cron = require('node-cron');
 
 const {
     default: makeWASocket,
@@ -199,4 +200,19 @@ app.get('/health', (req, res) => res.json({ status: 'ok', engine: 'Baileys Multi
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
     console.log(`🚀 RxNXT Baileys WhatsApp Engine running on port ${PORT}`);
+
+    // Schedule daily 8:00 AM IST automated reminder trigger (Runs on 24/7 $7 Render Server)
+    cron.schedule('0 8 * * *', async () => {
+        console.log('[Render 8AM Cron] ⏰ Triggering daily 8:00 AM IST WhatsApp reminders...');
+        try {
+            const appUrl = process.env.APP_URL || 'https://app.rxnxt.in';
+            const response = await fetch(`${appUrl}/api/cron/reminders`);
+            const data = await response.json().catch(() => ({}));
+            console.log('[Render 8AM Cron] ✅ Daily reminder execution result:', data);
+        } catch (err) {
+            console.error('[Render 8AM Cron] ❌ Error triggering daily reminders:', err.message);
+        }
+    }, {
+        timezone: "Asia/Kolkata"
+    });
 });
