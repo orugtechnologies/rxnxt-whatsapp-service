@@ -201,18 +201,24 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
     console.log(`🚀 RxNXT Baileys WhatsApp Engine running on port ${PORT}`);
 
-    // Schedule daily 8:00 AM IST automated reminder trigger (Runs on 24/7 $7 Render Server)
-    cron.schedule('0 8 * * *', async () => {
-        console.log('[Render 8AM Cron] ⏰ Triggering daily 8:00 AM IST WhatsApp reminders...');
+    const triggerReminders = async (slotLabel) => {
+        console.log(`[Render ${slotLabel} Cron] ⏰ Triggering Smart Slot WhatsApp reminders...`);
         try {
             const appUrl = process.env.APP_URL || 'https://app.rxnxt.in';
             const response = await fetch(`${appUrl}/api/cron/reminders`);
             const data = await response.json().catch(() => ({}));
-            console.log('[Render 8AM Cron] ✅ Daily reminder execution result:', data);
+            console.log(`[Render ${slotLabel} Cron] ✅ Reminder execution result:`, data);
         } catch (err) {
-            console.error('[Render 8AM Cron] ❌ Error triggering daily reminders:', err.message);
+            console.error(`[Render ${slotLabel} Cron] ❌ Error triggering reminders:`, err.message);
         }
-    }, {
-        timezone: "Asia/Kolkata"
-    });
+    };
+
+    // 1. Morning Slot (8:00 AM IST)
+    cron.schedule('0 8 * * *', () => triggerReminders('8:00 AM Morning'), { timezone: "Asia/Kolkata" });
+
+    // 2. Afternoon Slot (1:30 PM IST)
+    cron.schedule('30 13 * * *', () => triggerReminders('1:30 PM Afternoon'), { timezone: "Asia/Kolkata" });
+
+    // 3. Night Slot (8:30 PM IST)
+    cron.schedule('30 20 * * *', () => triggerReminders('8:30 PM Night'), { timezone: "Asia/Kolkata" });
 });
